@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     embedding_model: str = "intfloat/multilingual-e5-small"
 
     news_api_key: str = ""
-    news_api_base_url: str = "https://newsapi.org/v2"
+    news_api_base_url: str = "https://hacker-news.firebaseio.com/v0"
 
     backend_port: int = 8000
     frontend_port: int = 3000
