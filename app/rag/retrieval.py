@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import logging
 from functools import lru_cache
 from typing import Any
 
 from sentence_transformers import SentenceTransformer
 
 from app.config import get_settings
+from app.logger import AppLogger
 from app.rag.chroma_client import get_collection
 
-logger = logging.getLogger(__name__)
+logger = AppLogger.get_logger(__name__)
 
 
 @lru_cache(maxsize=1)

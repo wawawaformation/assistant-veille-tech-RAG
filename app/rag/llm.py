@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from functools import lru_cache
 from typing import Any
 
@@ -9,9 +8,10 @@ from langchain_azure_ai.chat_models import AzureAIChatCompletionsModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.config import get_settings
+from app.logger import AppLogger
 from app.schemas import ArticleCard, ChatResponse
 
-logger = logging.getLogger(__name__)
+logger = AppLogger.get_logger(__name__)
 
 
 SYSTEM_PROMPT = (

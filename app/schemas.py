@@ -37,3 +37,11 @@ class ChatResponse(BaseModel):
     answer: str
     cards: list[ArticleCard]
     status: Literal["ok", "empty", "degraded"] = "ok"
+
+
+class ArticleScraping(BaseModel):
+    title: str
+    url: HttpUrl | str
+    content: str
+    tags: list[str] = Field(default_factory=list)
+    date: datetime | None = None

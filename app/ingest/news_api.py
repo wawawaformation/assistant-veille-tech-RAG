@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 import requests
+from bs4 import BeautifulSoup
+from chromadb.api.types import Metadata
+from pydantic import BaseModel, HttpUrl, ValidationError
+import trafilatura
 
 from app.config import Settings, get_settings
-from pydantic import BaseModel, HttpUrl, ValidationError
+from app.ingest.topics import TOPIC_SYNONYMS
+from app.rag.chroma_client import get_collection
 from app.schemas import Article
 
 
 class RawHNItem(BaseModel):
-    """ Représente un article brut récupéré de l'API Hacker News """
-    
+    """Représente un article brut récupéré depuis l'API Hacker News."""
+
     id: int
     title: str
     url: HttpUrl | None = None
@@ -21,33 +27,26 @@ class RawHNItem(BaseModel):
     time: int
 
 
-TOPIC_SYNONYMS: dict[str, list[str]] = {
-    "technology": ["tech", "software", "digital", "computer", "internet", "ai"],
-    "programming": ["code", "coding", "developer", "dev", "python", "javascript", "rust", "java", "golang"],
-}
-    
-
-
 @dataclass
 class NewsApiIngester:
+    """Client d'ingestion Hacker News vers Chroma."""
+
     settings: Settings | None = None
 
     def __post_init__(self) -> None:
-        """ Charge les paramètres de configuration si pas déjà fournis """
-        
+        """Charge les paramètres de configuration si aucun objet Settings n'est fourni."""
+
         if self.settings is None:
             self.settings = get_settings()
-            
-            
 
     def get_last_id(self, number: int) -> list[int]:
-        
-        """ retourne les derniers IDs d'articles Hacker News, limités à `number` """
-        
+        """Retourne les derniers IDs d'articles Hacker News, limités à `number`."""
+
         settings = self.settings
         if settings is None:
             print("Settings unavailable")
             return []
+
         if number <= 0:
             return []
 
@@ -67,20 +66,35 @@ class NewsApiIngester:
             return []
 
         out: list[int] = []
+
         for raw_id in story_ids:
             if len(out) >= number:
                 break
+
             try:
                 out.append(int(raw_id))
             except (TypeError, ValueError):
                 continue
+
         return out
-    
-    
+
+    def get_story_ids_page(self, page: int = 1, page_size: int = 20) -> list[int]:
+        """Retourne une plage d'IDs d'articles Hacker News."""
+
+        if page < 1 or page_size <= 0:
+            return []
+
+        needed = page * page_size
+        all_ids = self.get_last_id(needed)
+
+        start = (page - 1) * page_size
+        end = start + page_size
+
+        return all_ids[start:end]
+
     def get_item_details(self, item_id: int) -> RawHNItem | None:
-        
-        """ Récupère les détails d'un article Hacker News à partir de son ID """
-        
+        """Récupère les détails d'un article Hacker News à partir de son ID."""
+
         settings = self.settings
         if settings is None:
             print("Settings unavailable")
@@ -92,87 +106,316 @@ class NewsApiIngester:
         try:
             response = requests.get(item_url, timeout=10)
             response.raise_for_status()
+
             item_data = response.json()
+
             return RawHNItem.model_validate(item_data)
+
         except (requests.RequestException, ValidationError) as exc:
             print(f"Failed to fetch or parse item {item_id}: {exc}")
             return None
 
-    def _topic_keywords(self, topic: str) -> list[str]:
-        
-        """ Retourne la liste des mots-clés associés à un topic donné, en incluant les synonymes """
-        normalized = topic.lower().strip()
-        return [normalized, *TOPIC_SYNONYMS.get(normalized, [])]
+    def _fetch_external_content(self, url: str) -> str | None:
+        """Récupère le texte principal de la page externe référencée par Hacker News."""
 
-    def _extract_matching_topics(self, item: RawHNItem, topics: list[str]) -> list[str]:
-        
-        """ Extrait la liste des topics correspondants à un article donné """
+        min_content_len = 120
+
+        headers = {
+            "User-Agent": "nauda-palisse-veille/0.1"
+        }
+
+        try:
+            response = requests.get(url, timeout=(5, 15), headers=headers)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            print(f"Failed to fetch external content {url}: {exc}")
+            return None
+
+        content_type = response.headers.get("content-type", "").lower()
+        html_hint = response.text[:512].lower()
+        looks_like_html = "<html" in html_hint or "<!doctype html" in html_hint
+
+        if "text/html" not in content_type and not looks_like_html:
+            return None
+
+        try:
+            extracted_md = trafilatura.extract(
+                response.text,
+                url=url,
+                output_format="markdown",
+                include_links=False,
+                deduplicate=True,
+                favor_precision=True,
+            )
+        except Exception as exc:
+            print(f"Trafilatura extraction failed for {url}: {type(exc).__name__}")
+            extracted_md = None
+
+        if extracted_md:
+            normalized_md = "\n".join(line.rstrip() for line in extracted_md.strip().splitlines())
+
+            if len(normalized_md) >= min_content_len:
+                return normalized_md
+
+        soup = BeautifulSoup(response.text, "lxml")
+
+        for tag in soup(
+            [
+                "script",
+                "style",
+                "noscript",
+                "header",
+                "footer",
+                "nav",
+                "aside",
+                "form",
+            ]
+        ):
+            tag.decompose()
+
+        container = soup.find("article") or soup.find("main") or soup.body or soup
+
+        text = container.get_text(" ", strip=True)
+        normalized = " ".join(text.split())
+
+        if len(normalized) < min_content_len:
+            return None
+
+        return normalized
+
+    def _topic_keywords(self, topic: str) -> list[str]:
+        """Retourne les mots-clés associés à un topic, synonymes inclus."""
+
+        normalized = topic.lower().strip()
+
+        return [
+            normalized,
+            *TOPIC_SYNONYMS.get(normalized, []),
+        ]
+
+    def _contains_keyword(self, haystack: str, keyword: str) -> bool:
+        """
+        Vérifie la présence d'un mot-clé dans un texte.
+
+        On utilise une regex avec limites de mots pour éviter que 'ai'
+        matche par erreur 'said', 'main', 'email', etc.
+        """
+
+        normalized_haystack = haystack.lower()
+        normalized_keyword = keyword.lower().strip()
+
+        if not normalized_keyword:
+            return False
+
+        pattern = r"\b" + re.escape(normalized_keyword) + r"\b"
+
+        return re.search(pattern, normalized_haystack) is not None
+
+    def _extract_matching_topics(
+        self,
+        item: RawHNItem,
+        topics: list[str],
+        external_content: str = "",
+    ) -> list[str]:
+        """Extrait la liste des topics correspondant à un article donné."""
+
         if not topics:
             return []
-        haystack = " ".join([
-            (item.title or ""),
-            (item.text or ""),
-            str(item.url) if item.url else "",
-        ]).lower()
+
+        haystack = " ".join(
+            [
+                item.title,
+                item.text or "",
+                str(item.url) if item.url else "",
+                external_content,
+            ]
+        )
 
         matched: list[str] = []
+
         for topic in topics:
             keywords = self._topic_keywords(topic)
-            if any(keyword in haystack for keyword in keywords):
+
+            if any(self._contains_keyword(haystack, keyword) for keyword in keywords):
                 matched.append(topic)
+
         return matched
 
-    def _matches_topics(self, item: RawHNItem, topics: list[str]) -> bool:
-        """ Vérifie si l'article correspond à au moins un des topics recherchés """
-        if not topics:
-            return True
-        return len(self._extract_matching_topics(item, topics)) > 0
+    def _to_article(
+        self,
+        item: RawHNItem,
+        matched_topics: list[str],
+        external_content: str,
+    ) -> Article:
+        """Convertit et valide un RawHNItem vers le schéma Article."""
 
-    def _to_article_dict(self, item: RawHNItem, matched_topics: list[str]) -> dict[str, Any]:
-        """ Convertit un RawHNItem en dictionnaire d'article """
-        article = Article(
-            id=str(item.id),
+        return Article(
+            id=f"hackernews:{item.id}",
             title=item.title,
             source="hackernews",
             date=datetime.fromtimestamp(item.time, tz=timezone.utc),
-            content=item.text or item.title,
+            content=external_content,
             url=str(item.url) if item.url else f"https://news.ycombinator.com/item?id={item.id}",
             tags=matched_topics,
         )
-        return article.model_dump()
 
-    def _collect_matching_articles(self, story_ids: list[int], topics: list[str]) -> list[dict[str, Any]]:
-        """ Collecte les articles correspondant aux topics donnés """
+    def _to_article_dict(self, article: Article) -> dict[str, Any]:
+        """Sérialise un Article validé en dictionnaire JSON-compatible."""
+
+        return article.model_dump(mode="json")
+
+    def _chunk_content(self, content: str) -> list[str]:
+        """Découpe le contenu en chunks. Pour l'instant: un seul chunk complet."""
+
+        normalized_content = content.strip()
+
+        if not normalized_content:
+            return []
+
+        return [normalized_content]
+
+
+    def _collect_matching_articles(
+        self,
+        story_ids: list[int],
+        topics: list[str],
+    ) -> list[dict[str, Any]]:
+        """Collecte les articles externes correspondant aux topics donnés."""
+
         articles: list[dict[str, Any]] = []
+
         for story_id in story_ids:
             item = self.get_item_details(story_id)
+
             if item is None:
                 continue
-            matched_topics = self._extract_matching_topics(item, topics)
-            if not topics or matched_topics:
-                articles.append(self._to_article_dict(item, matched_topics))
+
+            if item.url is None:
+                # Pour ce POC, on garde seulement les stories qui pointent vers un article externe.
+                continue
+
+            external_content = self._fetch_external_content(str(item.url))
+
+            if not external_content:
+                continue
+
+            matched_topics = self._extract_matching_topics(
+                item=item,
+                topics=topics,
+                external_content=external_content,
+            )
+
+            if topics and not matched_topics:
+                continue
+
+            article = self._to_article(
+                item=item,
+                matched_topics=matched_topics,
+                external_content=external_content,
+            )
+
+            articles.append(self._to_article_dict(article))
+
         return articles
 
-    def run(self, topics: list[str]) -> list[dict[str, Any]]:
+    def _upsert_to_chroma(self, articles: list[dict[str, Any]]) -> int:
+        """
+        Upsert les articles dans Chroma.
+
+        Pour ce pipeline de newsletter :
+        - 1 article complet = 1 document Chroma
+        - pas de découpage en plusieurs chunks
+        """
+
+        if not articles:
+            return 0
+
+        ids: list[str] = []
+        documents: list[str] = []
+        metadatas: list[Metadata] = []
+
+        for article in articles:
+            article_id = str(article.get("id", "")).strip()
+            content = str(article.get("content", ""))
+
+            if not article_id:
+                continue
+
+            chunks = self._chunk_content(content)
+
+            if not chunks:
+                continue
+
+            tags = article.get("tags", [])
+
+            if not isinstance(tags, list):
+                tags = []
+
+            for chunk_index, chunk in enumerate(chunks):
+                ids.append(article_id)
+                documents.append(chunk)
+                metadatas.append(
+                    {
+                        "article_id": article_id,
+                        "chunk_index": chunk_index,
+                        "chunk_count": len(chunks),
+                        "title": str(article.get("title", "")),
+                        "source": str(article.get("source", "")),
+                        "date": str(article.get("date", "")),
+                        "url": str(article.get("url", "")),
+                        "tags": ",".join(str(tag) for tag in tags),
+                    }
+                )
+
+        if not ids:
+            return 0
+
+        try:
+            collection = get_collection()
+
+            collection.upsert(
+                ids=ids,
+                documents=documents,
+                metadatas=metadatas,
+            )
+
+            return len(ids)
+
+        except Exception as exc:
+            print(f"Chroma upsert failed: {exc}")
+            return 0
+
+    def run(
+        self,
+        topics: list[str],
+        page: int = 1,
+        page_size: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Point d'entrée de l'ingestion : pagination, scraping, normalisation et upsert Chroma."""
+
         settings = self.settings
+
         if settings is None:
             print("Settings unavailable")
             return []
-    
-        # 1. recuperer les derniers IDs Hacker News (sample de 5)
-        top_stories = self.get_last_id(5)
-        print(f"Fetched {len(top_stories)} story ids: {top_stories}")
-        
-        # 2. On récupère les détails de chaque article et on filtre par topic
-        
-        articles = self._collect_matching_articles(top_stories, topics)
-        
-        # 3. Afficher le nombre d'articles collectés et les topics associés
-        print(f"Collected {len(articles)} articles matching topics {topics}")
+
+        story_ids = self.get_story_ids_page(
+            page=page,
+            page_size=page_size,
+        )
+
+        articles = self._collect_matching_articles(
+            story_ids=story_ids,
+            topics=topics,
+        )
+
+        upserted = self._upsert_to_chroma(articles)
+
+        print(
+            f"Collected {len(articles)} articles "
+            f"(page={page}, page_size={page_size}); "
+            f"upserted_chunks={upserted}"
+        )
+
         return articles
-        
     
-    
-if __name__ == "__main__":
-    ingester = NewsApiIngester()
-    ingester.run(["technology", "programming"])

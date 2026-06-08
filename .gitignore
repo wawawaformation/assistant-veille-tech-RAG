@@ -45,3 +45,6 @@ out/
 *.sqlite
 *.db
 chroma-data/
+
+
+app/logs/

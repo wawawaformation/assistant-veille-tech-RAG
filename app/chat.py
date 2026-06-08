@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import logging
-
 from app.ingest import enrich as ingest_enrich
+from app.logger import AppLogger
 from app.rag import retrieval
 from app.rag.llm import compose_answer
 from app.runtime import fresh_news
 from app.schemas import ChatRequest, ChatResponse
 
-logger = logging.getLogger(__name__)
+logger = AppLogger.get_logger(__name__)
 
 
 async def handle_chat(req: ChatRequest) -> ChatResponse:
