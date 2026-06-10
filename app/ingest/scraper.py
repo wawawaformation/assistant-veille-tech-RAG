@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha1
 from typing import Any
 
 from bs4 import BeautifulSoup
 import requests
 import trafilatura
+from app.ingest.cleaning import clean_html_to_markdown, strip_boilerplate
 from app.logger import AppLogger
+from app.rag.indexing import upsert_articles
 from app.schemas import ArticleScraping
 
 
@@ -35,7 +38,9 @@ class Scraper:
             logger.warning("Impossible de recuperer le contenu HTML pour %s", url)
             return ""
 
-        extracted = trafilatura.extract(html) or ""
+        soup = BeautifulSoup(html, "lxml")
+        cleaned_soup = strip_boilerplate(soup)
+        extracted = clean_html_to_markdown(str(cleaned_soup))
 
         if not extracted:
             logger.info("Aucun contenu extrait pour %s", url)
@@ -96,18 +101,6 @@ class Scraper:
 
         return published.strip()
 
-    def _to_datetime_or_none(self, raw: str) -> datetime | None:
-        """Convertit une date texte en datetime si possible."""
-
-        value = raw.strip()
-        if not value:
-            return None
-
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-
     def _build_article_from_node(self, article_node: Any) -> ArticleScraping | None:
         """Construit un ArticleScraping depuis un noeud article ou retourne None."""
 
@@ -125,24 +118,20 @@ class Scraper:
             )
             return None
 
-        return self.format_article(
-            {
-                "title": title,
-                "url": url_value,
-                "published": published,
-                "content": self._extract_text(url_value),
-                "tags": self._extract_tags(url_value),
-            }
-        )
+        raw_date = published.strip()
+        parsed_date = None
+        if raw_date:
+            try:
+                parsed_date = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+            except ValueError:
+                parsed_date = None
 
-    def format_article(self, article: dict[str, Any]) -> ArticleScraping:
-        """Formate et valide un article brut selon le schema ArticleScraping."""
         return ArticleScraping(
-            title=article.get("title", "").strip(),
-            url=article.get("url", "").strip(),
-            date=self._to_datetime_or_none(str(article.get("published", ""))),
-            content=article.get("content", "").strip(),
-            tags=article.get("tags", []),
+            title=title,
+            url=url_value,
+            date=parsed_date,
+            content=self._extract_text(url_value).strip(),
+            tags=self._extract_tags(url_value),
         )
     
     
@@ -170,22 +159,49 @@ class Scraper:
 
         return articles
 
+    def _to_rag_articles(self, articles: list[ArticleScraping]) -> list[dict[str, Any]]:
+        """Convertit les articles scrapes vers le format attendu par l'indexation RAG."""
 
-    def run(self, urls: list[str]) -> list[ArticleScraping]:
-        """ Lance le scrapping de la premiere url fournie pour instant"""
+        out: list[dict[str, Any]] = []
+
+        for article in articles:
+            url = str(article.url).strip()
+            if not url:
+                continue
+
+            article_id = f"scraper:{sha1(url.encode('utf-8')).hexdigest()[:16]}"
+            out.append(
+                {
+                    "id": article_id,
+                    "title": article.title,
+                    "source": "scraper",
+                    "date": article.date.isoformat() if article.date else "",
+                    "content": article.content,
+                    "url": url,
+                    "tags": article.tags,
+                }
+            )
+
+        return out
+
+
+    def run(self, urls: list[str], upsert_to_rag: bool = True) -> list[ArticleScraping]:
+        """Lance le scraping et peut optionnellement indexer les resultats dans le RAG."""
         if not urls:
             logger.warning("Aucune URL fournie au scraper")
             return []
 
         logger.info("Demarrage scraping url=%s howmany=%s", urls[0], 5)
         articles = self.get_articles_list(urls[0], 5)
+
+        if upsert_to_rag and articles:
+            upserted = upsert_articles(self._to_rag_articles(articles))
+            logger.info("Indexation RAG terminee: %s chunk(s) upsertes", upserted)
+
         logger.info("Scraping termine: %s article(s) collecte(s)", len(articles))
 
         for article in articles:
-            print(f"Title: {article.title}")
-            print(f"URL: {article.url}")
-            print(f"Published: {article.date}")
-            print(f"Content: {article.content}...")
+            print(article)
             print("-" * 80)
         return articles
         
@@ -195,4 +211,4 @@ class Scraper:
 
 if __name__ == "__main__":
     scraper = Scraper()
-    scraper.run(["https://korben.info/"])
+    scraper.run(["https://korben.info/"], upsert_to_rag=True)

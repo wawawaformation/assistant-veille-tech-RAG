@@ -1,27 +1,58 @@
 from __future__ import annotations
 
-from functools import lru_cache
+from datetime import datetime, timezone
 from typing import Any
 
-from sentence_transformers import SentenceTransformer
-
-from app.config import get_settings
+from app.rag.embedding import embed
 from app.logger import AppLogger
 from app.rag.chroma_client import get_collection
 
 logger = AppLogger.get_logger(__name__)
 
 
-@lru_cache(maxsize=1)
-def get_embedder() -> SentenceTransformer:
-    settings = get_settings()
-    return SentenceTransformer(settings.embedding_model)
+def _parse_date_or_none(value: Any) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
-def embed(text: str) -> list[float]:
-    embedder = get_embedder()
-    vec = embedder.encode([text], normalize_embeddings=True)
-    return vec[0].tolist()
+def _freshness_score(metadata: dict[str, Any]) -> float:
+    parsed = _parse_date_or_none(metadata.get("date"))
+    if parsed is None:
+        return 0.0
+
+    now = datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    age_days = (now - parsed.astimezone(timezone.utc)).total_seconds() / 86400.0
+    if age_days <= 0:
+        return 1.0
+
+    # Decroissance douce: 1.0 a J0, ~0.5 a J7, ~0.2 a J30.
+    return 1.0 / (1.0 + (age_days / 7.0))
+
+
+def _rerank(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for chunk in chunks:
+        dist = chunk.get("distance")
+        try:
+            dist_value = max(float(dist), 0.0)
+        except (TypeError, ValueError):
+            dist_value = 1.0
+
+        # Distance Chroma (cosine) faible = meilleur. On convertit en similarite [0,1].
+        semantic_score = 1.0 / (1.0 + dist_value)
+        freshness = _freshness_score(chunk.get("metadata") or {})
+        chunk["score"] = 0.85 * semantic_score + 0.15 * freshness
+
+    return sorted(chunks, key=lambda c: float(c.get("score", 0.0)), reverse=True)
 
 
 def retrieve(query: str, k: int = 8) -> list[dict[str, Any]]:
@@ -48,4 +79,4 @@ def retrieve(query: str, k: int = 8) -> list[dict[str, Any]]:
                 "distance": dist,
             }
         )
-    return chunks
+    return _rerank(chunks)[:k]

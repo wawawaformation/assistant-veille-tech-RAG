@@ -7,13 +7,12 @@ from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
-from chromadb.api.types import Metadata
 from pydantic import BaseModel, HttpUrl, ValidationError
-import trafilatura
 
 from app.config import Settings, get_settings
+from app.ingest.cleaning import clean_html_to_markdown, strip_boilerplate
 from app.ingest.topics import TOPIC_SYNONYMS
-from app.rag.chroma_client import get_collection
+from app.rag.indexing import upsert_articles
 from app.schemas import Article
 
 
@@ -138,50 +137,14 @@ class NewsApiIngester:
         if "text/html" not in content_type and not looks_like_html:
             return None
 
-        try:
-            extracted_md = trafilatura.extract(
-                response.text,
-                url=url,
-                output_format="markdown",
-                include_links=False,
-                deduplicate=True,
-                favor_precision=True,
-            )
-        except Exception as exc:
-            print(f"Trafilatura extraction failed for {url}: {type(exc).__name__}")
-            extracted_md = None
-
-        if extracted_md:
-            normalized_md = "\n".join(line.rstrip() for line in extracted_md.strip().splitlines())
-
-            if len(normalized_md) >= min_content_len:
-                return normalized_md
-
         soup = BeautifulSoup(response.text, "lxml")
+        cleaned_soup = strip_boilerplate(soup)
+        normalized_md = clean_html_to_markdown(str(cleaned_soup))
 
-        for tag in soup(
-            [
-                "script",
-                "style",
-                "noscript",
-                "header",
-                "footer",
-                "nav",
-                "aside",
-                "form",
-            ]
-        ):
-            tag.decompose()
-
-        container = soup.find("article") or soup.find("main") or soup.body or soup
-
-        text = container.get_text(" ", strip=True)
-        normalized = " ".join(text.split())
-
-        if len(normalized) < min_content_len:
+        if len(normalized_md) < min_content_len:
             return None
 
-        return normalized
+        return normalized_md
 
     def _topic_keywords(self, topic: str) -> list[str]:
         """Retourne les mots-clés associés à un topic, synonymes inclus."""
@@ -264,17 +227,6 @@ class NewsApiIngester:
 
         return article.model_dump(mode="json")
 
-    def _chunk_content(self, content: str) -> list[str]:
-        """Découpe le contenu en chunks. Pour l'instant: un seul chunk complet."""
-
-        normalized_content = content.strip()
-
-        if not normalized_content:
-            return []
-
-        return [normalized_content]
-
-
     def _collect_matching_articles(
         self,
         story_ids: list[int],
@@ -318,73 +270,6 @@ class NewsApiIngester:
 
         return articles
 
-    def _upsert_to_chroma(self, articles: list[dict[str, Any]]) -> int:
-        """
-        Upsert les articles dans Chroma.
-
-        Pour ce pipeline de newsletter :
-        - 1 article complet = 1 document Chroma
-        - pas de découpage en plusieurs chunks
-        """
-
-        if not articles:
-            return 0
-
-        ids: list[str] = []
-        documents: list[str] = []
-        metadatas: list[Metadata] = []
-
-        for article in articles:
-            article_id = str(article.get("id", "")).strip()
-            content = str(article.get("content", ""))
-
-            if not article_id:
-                continue
-
-            chunks = self._chunk_content(content)
-
-            if not chunks:
-                continue
-
-            tags = article.get("tags", [])
-
-            if not isinstance(tags, list):
-                tags = []
-
-            for chunk_index, chunk in enumerate(chunks):
-                ids.append(article_id)
-                documents.append(chunk)
-                metadatas.append(
-                    {
-                        "article_id": article_id,
-                        "chunk_index": chunk_index,
-                        "chunk_count": len(chunks),
-                        "title": str(article.get("title", "")),
-                        "source": str(article.get("source", "")),
-                        "date": str(article.get("date", "")),
-                        "url": str(article.get("url", "")),
-                        "tags": ",".join(str(tag) for tag in tags),
-                    }
-                )
-
-        if not ids:
-            return 0
-
-        try:
-            collection = get_collection()
-
-            collection.upsert(
-                ids=ids,
-                documents=documents,
-                metadatas=metadatas,
-            )
-
-            return len(ids)
-
-        except Exception as exc:
-            print(f"Chroma upsert failed: {exc}")
-            return 0
-
     def run(
         self,
         topics: list[str],
@@ -409,7 +294,7 @@ class NewsApiIngester:
             topics=topics,
         )
 
-        upserted = self._upsert_to_chroma(articles)
+        upserted = upsert_articles(articles)
 
         print(
             f"Collected {len(articles)} articles "
