@@ -50,7 +50,7 @@ class NewsApiIngester:
             return []
 
         base_url = settings.news_api_base_url.rstrip("/")
-        ids_url = f"{base_url}/newstories.json"
+        ids_url = f"{base_url}/topstories.json"
 
         try:
             response = requests.get(ids_url, timeout=10)
@@ -133,11 +133,13 @@ class NewsApiIngester:
         content_type = response.headers.get("content-type", "").lower()
         html_hint = response.text[:512].lower()
         looks_like_html = "<html" in html_hint or "<!doctype html" in html_hint
+        looks_like_xml = html_hint.startswith("<?xml") or "<rss" in html_hint or "<feed" in html_hint
 
-        if "text/html" not in content_type and not looks_like_html:
+        if "text/html" not in content_type and not looks_like_html and not looks_like_xml:
             return None
 
-        soup = BeautifulSoup(response.text, "lxml")
+        parser = "xml" if ("xml" in content_type or looks_like_xml) else "lxml"
+        soup = BeautifulSoup(response.text, parser)
         cleaned_soup = strip_boilerplate(soup)
         normalized_md = clean_html_to_markdown(str(cleaned_soup))
 
@@ -242,19 +244,19 @@ class NewsApiIngester:
             if item is None:
                 continue
 
-            if item.url is None:
-                # Pour ce POC, on garde seulement les stories qui pointent vers un article externe.
-                continue
+            external_content = ""
+            if item.url is not None:
+                external_content = self._fetch_external_content(str(item.url)) or ""
 
-            external_content = self._fetch_external_content(str(item.url))
-
-            if not external_content:
+            # Fallback sur le texte HN si le contenu externe est indisponible
+            content = external_content or item.text or ""
+            if not content:
                 continue
 
             matched_topics = self._extract_matching_topics(
                 item=item,
                 topics=topics,
-                external_content=external_content,
+                external_content=content,
             )
 
             if topics and not matched_topics:
@@ -263,7 +265,7 @@ class NewsApiIngester:
             article = self._to_article(
                 item=item,
                 matched_topics=matched_topics,
-                external_content=external_content,
+                external_content=content,
             )
 
             articles.append(self._to_article_dict(article))
@@ -274,7 +276,7 @@ class NewsApiIngester:
         self,
         topics: list[str],
         page: int = 1,
-        page_size: int = 20,
+        page_size: int = 50,
     ) -> list[dict[str, Any]]:
         """Point d'entrée de l'ingestion : pagination, scraping, normalisation et upsert Chroma."""
 

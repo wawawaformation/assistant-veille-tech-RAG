@@ -12,14 +12,18 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.ingest.news_api import NewsApiIngester
 from app.ingest.scraper import Scraper
+from app.rag.indexing import upsert_articles
 
 app = typer.Typer(help="Ingestion CLI for the veille tech index.")
 
 
 @app.command()
-def news(topics: list[str] = typer.Option([], "--topic", "-t", help="Topic to query.")) -> None:
+def news(
+    topics: list[str] = typer.Option([], "--topic", "-t", help="Topic to query."),
+    page_size: int = typer.Option(20, "--page-size", "-n", help="Max articles to fetch per run."),
+) -> None:
     ingester = NewsApiIngester()
-    articles = ingester.run(topics)
+    articles = ingester.run(topics, page_size=page_size)
     typer.echo(f"Ingested {len(articles)} articles")
     typer.echo(json.dumps(articles, default=str, ensure_ascii=False, indent=2))
 
@@ -28,6 +32,11 @@ def news(topics: list[str] = typer.Option([], "--topic", "-t", help="Topic to qu
 def scrape(
     urls: list[str] = typer.Option(..., "--url", "-u", help="URL to scrape."),
     howmany: int = typer.Option(5, "--howmany", "-n", help="Max articles per URL."),
+    upsert: bool = typer.Option(
+        True,
+        "--upsert/--no-upsert",
+        help="Index scraped articles into Chroma (enabled by default).",
+    ),
 ) -> None:
     if howmany <= 0:
         raise typer.BadParameter("--howmany must be a positive integer")
@@ -38,9 +47,16 @@ def scrape(
     for url in urls:
         all_articles.extend(scraper.get_articles_list(url, howmany=howmany))
 
+    upserted_chunks = 0
+    if upsert and all_articles:
+        rag_articles = scraper._to_rag_articles(all_articles)
+        upserted_chunks = upsert_articles(rag_articles)
+
     payload = [article.model_dump(mode="json") for article in all_articles]
 
     typer.echo(f"Scraped {len(payload)} articles from {len(urls)} URL(s)")
+    if upsert:
+        typer.echo(f"Indexed {upserted_chunks} chunk(s) into Chroma")
     typer.echo(json.dumps(payload, default=str, ensure_ascii=False, indent=2))
 
 

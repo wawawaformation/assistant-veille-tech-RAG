@@ -4,7 +4,7 @@ import json
 from functools import lru_cache
 from typing import Any
 
-from langchain_azure_ai.chat_models import AzureAIChatCompletionsModel
+from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.config import get_settings
@@ -24,15 +24,20 @@ SYSTEM_PROMPT = (
 
 
 @lru_cache(maxsize=1)
-def get_llm() -> AzureAIChatCompletionsModel | None:
+def get_llm() -> AzureChatOpenAI | None:
     settings = get_settings()
     if not settings.azure_ai_inference_endpoint or not settings.azure_ai_inference_api_key:
         logger.info("Azure AI inference not configured — running in degraded mode")
         return None
-    return AzureAIChatCompletionsModel(
-        endpoint=settings.azure_ai_inference_endpoint,
-        credential=settings.azure_ai_inference_api_key,
-        model=settings.azure_ai_inference_model,
+    # L'endpoint Azure AI Foundry se présente sous la forme
+    # https://<resource>.services.ai.azure.com/openai/v1 — on passe la base
+    # sans le suffixe /openai/v1 car AzureChatOpenAI le reconstruit lui-même.
+    base = settings.azure_ai_inference_endpoint.removesuffix("/openai/v1").removesuffix("/")
+    return AzureChatOpenAI(
+        azure_endpoint=base,
+        api_key=settings.azure_ai_inference_api_key,
+        azure_deployment=settings.azure_ai_inference_model,
+        api_version=settings.azure_ai_inference_api_version,
         temperature=0.2,
     )
 
@@ -144,15 +149,25 @@ async def compose_answer(
         raw = msg.content if isinstance(msg.content, str) else str(msg.content)
         answer = _extract_answer(raw)
     except Exception as exc:
-        logger.warning("LLM call failed: %s", exc)
+        logger.exception("LLM call failed: %s", exc)
         answer = f"Synthèse indisponible (erreur LLM). {len(cards)} article(s) référencé(s)."
 
     return ChatResponse(answer=answer, cards=cards, status="ok")
 
 
+def _strip_markdown_fence(raw: str) -> str:
+    """Enlève les blocs ```json ... ``` que certains LLM ajoutent."""
+    stripped = raw.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("\n", 1)[-1]
+        if stripped.endswith("```"):
+            stripped = stripped[: stripped.rfind("```")]
+    return stripped.strip()
+
+
 def _extract_answer(raw: str) -> str:
     try:
-        data = json.loads(raw)
+        data = json.loads(_strip_markdown_fence(raw))
         if isinstance(data, dict) and "answer" in data:
             return str(data["answer"])
     except json.JSONDecodeError:

@@ -54,7 +54,7 @@ async def fetch(
     # 3. Pour chaque ID, récupérer les détails de l'article
     # 4. Filtrer par topics (chercher les mots-clés dans le titre/url)
     # 5. Filtrer par `since` si fourni. Il faudra regler ce probleme de timezone aware qui fait louper le test
-     # 6. Retourner des dicts avec : title, url, source, date, content, tags
+    # 6. Retourner des dicts avec : title, url, source, date, content, tags
     
     
     
@@ -84,9 +84,10 @@ async def fetch(
 
     
     if since:
+        since_aware = since if since.tzinfo is not None else since.replace(tzinfo=timezone.utc)
         filtered_articles = [
             article for article in filtered_articles
-            if datetime.fromtimestamp(article.get("time", 0)) > since
+            if datetime.fromtimestamp(article.get("time", 0), tz=timezone.utc) > since_aware
         ]
 
    

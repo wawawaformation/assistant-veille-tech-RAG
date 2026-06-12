@@ -13,7 +13,7 @@ logger = AppLogger.get_logger(__name__)
 async def handle_chat(req: ChatRequest) -> ChatResponse:
     query = _expand_query(req.question, req.topics)
 
-    retrieved = retrieval.retrieve(query, k=8)
+    retrieved = retrieval.retrieve(query, k=8, topics=req.topics)
 
     try:
         enriched = ingest_enrich.enrich_retrieval(retrieved)

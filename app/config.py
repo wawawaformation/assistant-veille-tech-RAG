@@ -9,9 +9,11 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
 
+    
     azure_ai_inference_endpoint: str = ""
     azure_ai_inference_api_key: str = ""
     azure_ai_inference_model: str = "Kimi-K2.6"
+    azure_ai_inference_api_version: str = "2024-05-01-preview"
 
     chroma_url: str = "http://chromadb:8000"
     chroma_collection: str = "articles"

@@ -138,6 +138,9 @@ class Scraper:
     def get_articles_list(self, url: str, howmany: int) -> list[ArticleScraping]:
         """Retourne une liste d'articles scrapes et valides."""
 
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+
         try:
             response = requests.get(
                 url,

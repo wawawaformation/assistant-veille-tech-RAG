@@ -43,7 +43,7 @@ def _rerank(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for chunk in chunks:
         dist = chunk.get("distance")
         try:
-            dist_value = max(float(dist), 0.0)
+            dist_value = max(float(dist), 0.0) if dist is not None else 1.0
         except (TypeError, ValueError):
             dist_value = 1.0
 
@@ -55,11 +55,25 @@ def _rerank(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(chunks, key=lambda c: float(c.get("score", 0.0)), reverse=True)
 
 
-def retrieve(query: str, k: int = 8) -> list[dict[str, Any]]:
+def _build_where_filter(topics: list[str]) -> dict[str, Any] | None:
+    """Construit un filtre ChromaDB sur le champ `tags` (CSV) pour les topics donnés."""
+    clean = [t.strip().lower() for t in topics if t.strip()]
+    if not clean:
+        return None
+    if len(clean) == 1:
+        return {"tags": {"$contains": clean[0]}}
+    return {"$or": [{"tags": {"$contains": t}} for t in clean]}
+
+
+def retrieve(query: str, k: int = 8, topics: list[str] | None = None) -> list[dict[str, Any]]:
+    where = _build_where_filter(topics or [])
     try:
         collection = get_collection()
         query_vec = embed(query)
-        result = collection.query(query_embeddings=[query_vec], n_results=k)
+        kwargs: dict[str, Any] = {"query_embeddings": [query_vec], "n_results": k}
+        if where:
+            kwargs["where"] = where
+        result = collection.query(**kwargs)
     except Exception as exc:
         logger.warning("retrieval failed: %s", exc)
         return []
