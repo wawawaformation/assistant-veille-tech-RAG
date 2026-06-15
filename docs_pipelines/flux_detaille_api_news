@@ -1,0 +1,26 @@
+uv run scripts/ingest_cli.py news
+
+scripts/ingest_cli.py.news(topics=[], page_size=20) (valeurs par défaut)
+-> app/ingest/news_api.py.NewsApiIngester.post_init() (charge Settings)
+-> app/ingest/news_api.py.NewsApiIngester.run(topics, page=1, page_size=20) (orchestration)
+-> app/ingest/news_api.py.NewsApiIngester.get_story_ids_page(page=1, page_size=20) (calcule la fenêtre)
+-> app/ingest/news_api.py.NewsApiIngester.get_last_id(20) (GET topstories.json HN, retourne les 20 premiers IDs)
+-> app/ingest/news_api.py.NewsApiIngester._collect_matching_articles(story_ids, topics) (boucle sur les 20 IDs)
+
+Pour chaque story_id :
+-> app/ingest/news_api.py.NewsApiIngester.get_item_details(id) (GET item/{id}.json → valide RawHNItem)
+-> app/ingest/news_api.py.NewsApiIngester._fetch_external_content(url) (GET page externe, parse, nettoie)
+-> app/ingest/cleaning.py.strip_boilerplate(soup) (retire éléments parasites)
+-> app/ingest/cleaning.py.clean_html_to_markdown(html) (normalise en markdown)
+-> app/ingest/news_api.py.NewsApiIngester._extract_matching_topics(item, topics, content) (filtre par topics)
+-> app/ingest/news_api.py.NewsApiIngester._topic_keywords(topic) (ajoute synonymes depuis topics.py)
+-> app/ingest/news_api.py.NewsApiIngester._contains_keyword(haystack, keyword) (matching regex \bword\b)
+-> app/ingest/news_api.py.NewsApiIngester._to_article(item, matched_topics, content) (normalise vers Article)
+-> app/ingest/news_api.py.NewsApiIngester._to_article_dict(article) (sérialise JSON-compatible)
+
+Indexation (automatique, pas de flag) :
+-> app/rag/indexing.py.upsert_articles(articles)
+-> app/rag/indexing.py._prepare_chunks(...) → app/ingest/cleaning.py.chunk(...)
+-> app/rag/embedding.py.embed_many(documents)
+-> app/rag/chroma_client.py.get_collection() → collection.upsert(...)
+-> scripts/ingest_cli.py.typer.echo() (affiche "Ingested N articles" + JSON)

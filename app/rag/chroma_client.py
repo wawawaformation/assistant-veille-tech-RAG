@@ -11,7 +11,12 @@ from app.config import get_settings
 
 
 @lru_cache(maxsize=1)
-def get_client() -> chromadb.HttpClient:
+def get_client():
+    """Crée et retourne le client HTTP ChromaDB (singleton via lru_cache).
+
+    Lit l'URL de connexion depuis la configuration de l'application et se connecte
+    au serveur ChromaDB distant. La télémétrie anonyme est désactivée.
+    """
     settings = get_settings()
     parsed = urlparse(settings.chroma_url)
     host = parsed.hostname or "chromadb"
@@ -24,6 +29,11 @@ def get_client() -> chromadb.HttpClient:
 
 
 def get_collection() -> Collection:
+    """Retourne la collection ChromaDB de l'application, en la créant si elle n'existe pas.
+
+    Utilise la distance cosine (HNSW) comme espace de similarité vectorielle.
+    Le nom de la collection est lu depuis la configuration de l'application.
+    """
     settings = get_settings()
     client = get_client()
     return client.get_or_create_collection(

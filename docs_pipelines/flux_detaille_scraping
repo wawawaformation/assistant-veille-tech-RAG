@@ -1,0 +1,29 @@
+uv run scripts/ingest_cli.py scrape --url korben.info --howmany 10
+-> scripts/ingest_cli.py.app() (Typer route la commande scrape)
+-> scripts/ingest_cli.py.scrape(urls, howmany, upsert=True) (valide paramètres, instancie Scraper, boucle sur les URLs)
+-> app/ingest/scraper.py.Scraper.get_articles_list(url, howmany) (normalise URL, GET page listing, parse HTML, prend jusqu’à howmany articles)
+-> app/ingest/scraper.py.Scraper._build_article_from_node(node) (extrait titre/url/date, ignore article incomplet, construit ArticleScraping)
+
+Pour chaque article retenu :
+scraper.py.Scraper._build_article_from_node(...)
+-> scraper.py.Scraper._extract_text(article_url) (fetch contenu article)
+-> cleaning.py.strip_boilerplate(soup) (retire éléments parasites)
+-> cleaning.py.clean_html_to_markdown(html) (HTML -> Markdown)
+-> scraper.py.Scraper._extract_tags(article_url) (récupère tags depuis la page article)
+-> schemas.py.ArticleScraping(...) (objet final)
+
+Puis indexation :
+scripts/ingest_cli.py.scrape(...)
+-> scraper.py.Scraper._to_rag_articles(articles) (convertit en format RAG id/title/source/date/content/url/tags)
+-> indexing.py.upsert_articles(rag_articles) (orchestration indexation)
+-> indexing.py._prepare_chunks(...) (prépare ids/documents/metadatas)
+-> cleaning.py.chunk(text, max_chars=1200, overlap_chars=200) (découpe en chunks)
+-> embedding.py.embed_many(documents) (génère embeddings)
+-> chroma_client.py.get_collection() (récupère collection Chroma)
+-> indexing.py.collection.upsert(ids, documents, metadatas, embeddings) (écrit dans Chroma)
+-> scripts/ingest_cli.py.typer.echo(...) (affiche Scraped X + Indexed Y chunk(s) + payload JSON)
+
+Branche alternative :
+scripts/ingest_cli.py.scrape(..., upsert=False) via --no-upsert
+-> scrape uniquement
+-> pas de chunk/embedding/chroma.

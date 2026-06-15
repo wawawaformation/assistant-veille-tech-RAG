@@ -1,0 +1,55 @@
+POST /chat  { question: "...", topics: ["ai-ml"] }
+-> app/main.py.chat(req: ChatRequest) (FastAPI route, valide le body via Pydantic)
+-> app/chat.py.handle_chat(req) (orchestre l'ensemble du pipeline)
+
+Étape 1 — Expansion de la requête :
+chat.py._expand_query(question, topics)
+-> concatène la question et les topics pour enrichir la recherche sémantique
+-> ex: "Quoi de neuf en IA ? | ai-ml"
+
+Étape 2 — Recherche vectorielle (RAG) :
+chat.py -> app/rag/retrieval.py.retrieve(query, k=8, topics)
+-> retrieval.py._build_where_filter(topics) (construit le filtre ChromaDB $contains/$or à partir des topics + synonymes de app/ingest/topics.py.TOPIC_SYNONYMS)
+-> app/rag/embedding.py.embed(query) (transforme la requête en vecteur float[])
+-> retrieval.py._query_collection(k, query_vec, where) (appelle ChromaDB)
+   -> app/rag/chroma_client.py.get_collection() (connexion HTTP au serveur ChromaDB, singleton lru_cache)
+   -> collection.query(query_embeddings, n_results, where_document) (recherche par similarité cosine)
+-> Si aucun résultat avec filtre topics → relance sans filtre (fallback défensif)
+-> retrieval.py._rerank(chunks) (recalcule score = 85% similarité sémantique + 15% fraîcheur)
+   -> retrieval.py._freshness_score(metadata) (décroissance temporelle : 1.0 à J0, ~0.5 à J7)
+-> retourne les k meilleurs chunks triés par score
+
+Étape 3 — Enrichissement optionnel :
+chat.py -> app/ingest/enrich.py.enrich_retrieval(retrieved)
+-> non implémenté (NotImplementedError capturé), enriched = []
+
+Étape 4 — Déduplication :
+chat.py._dedupe_retrieved_by_article(retrieved, limit=8)
+-> ne conserve que le premier chunk par article source (via article_id dans metadata)
+
+Étape 5 — Actualité fraîche (Hacker News) :
+chat.py -> app/runtime/fresh_news.py.fetch(topics, since=None)
+-> fresh_news._fetch_story_ids(client) (GET topstories.json + newstories.json sur l'API HN, fusionne et déduplique)
+-> Pour chaque ID (limite 100) : GET /v0/item/{id}.json (récupère titre, url, texte, date)
+-> fresh_news._extract_matching_topics(title, url, text, topics)
+   -> fresh_news._topic_keywords(topic) (topic + TOPIC_SYNONYMS + _TOPIC_ALIASES locaux)
+   -> fresh_news._contains_keyword(haystack, keyword) (regex \bkeyword\b)
+-> Filtre par date si `since` fourni (timezone-aware)
+-> Retourne liste de dicts {title, url, source="hn", date, content, tags}
+
+Étape 6 — Génération de la réponse (LLM) :
+chat.py -> app/rag/llm.py.compose_answer(question, topics, retrieved_chunks, fresh_articles)
+-> llm.py._build_cards(retrieved_chunks, fresh_articles) (construit les ArticleCard pour le frontend)
+-> Si aucune source disponible → retourne ChatResponse(status="empty") sans appel LLM
+-> llm.py.get_llm() (singleton AzureChatOpenAI via lru_cache, ou None si non configuré)
+-> Si LLM absent → retourne ChatResponse(status="degraded") avec les cartes brutes
+-> llm.py._format_context(retrieved_chunks, fresh_articles) (formate le contexte en texte)
+   -> section "## Index interne" pour les chunks ChromaDB
+   -> section "## Actualité fraîche" pour les articles HN
+-> llm.ainvoke([SystemMessage(SYSTEM_PROMPT), HumanMessage({question, topics, context})])
+   -> SYSTEM_PROMPT : réponds en français, JSON strict {answer, cards}
+-> llm.py._extract_answer(raw) (parse le JSON, retire les blocs ```json si présents)
+-> retourne ChatResponse(answer, cards, status="ok")
+
+Réponse finale :
+{ "answer": "...", "cards": [{title, source, date, snippet, url, tags}, ...], "status": "ok" }

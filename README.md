@@ -110,3 +110,8 @@ Interne Nauda Palisse.
 ## Contact
 
 veille@nauda-palisse.example
+
+## flux détaillés des pipeline
+
+Voir_dossier `docs_pipelines` pour des diagrammes détaillés des pipelines d'ingestion, de retrieval et de chat.
+

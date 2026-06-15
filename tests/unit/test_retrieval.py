@@ -15,27 +15,47 @@ def test_build_where_filter_empty_returns_none() -> None:
 
 def test_build_where_filter_single_topic() -> None:
     result = _build_where_filter(["ai"])
-    assert result == {"tags": {"$contains": "ai"}}
+    assert result == {"$contains": "ai"}
 
 
 def test_build_where_filter_multiple_topics() -> None:
     result = _build_where_filter(["ai", "devops"])
     assert result == {
         "$or": [
-            {"tags": {"$contains": "ai"}},
-            {"tags": {"$contains": "devops"}},
+            {"$contains": "ai"},
+            {"$contains": "devops"},
+            {"$contains": "docker"},
+            {"$contains": "infrastructure"},
+            {"$contains": "kubernetes"},
         ]
     }
 
 
 def test_build_where_filter_strips_and_lowercases() -> None:
     result = _build_where_filter(["  AI  "])
-    assert result == {"tags": {"$contains": "ai"}}
+    assert result == {"$contains": "ai"}
 
 
 def test_build_where_filter_ignores_blank_entries() -> None:
     result = _build_where_filter(["", "  ", "python"])
-    assert result == {"tags": {"$contains": "python"}}
+    assert result == {
+        "$or": [
+            {"$contains": "programming"},
+            {"$contains": "python"},
+        ]
+    }
+
+
+def test_build_where_filter_expands_frontend_slug_aliases() -> None:
+    result = _build_where_filter(["ai-ml"])
+    assert result == {
+        "$or": [
+            {"$contains": "ai"},
+            {"$contains": "ai-ml"},
+            {"$contains": "llm"},
+            {"$contains": "machine learning"},
+        ]
+    }
 
 
 # ── retrieve ─────────────────────────────────────────────────────────────────
@@ -72,7 +92,7 @@ def test_retrieve_passes_where_filter_to_chroma(mock_embed, mock_get_col) -> Non
     retrieve("test query", k=4, topics=["ai"])
 
     call_kwargs = mock_col.query.call_args.kwargs
-    assert call_kwargs["where"] == {"tags": {"$contains": "ai"}}
+    assert call_kwargs["where_document"] == {"$contains": "ai"}
     assert call_kwargs["n_results"] == 4
 
 
@@ -94,3 +114,23 @@ def test_retrieve_no_topics_no_where_filter(mock_embed, mock_get_col) -> None:
 def test_retrieve_returns_empty_on_error(mock_embed, mock_get_col) -> None:
     result = retrieve("query")
     assert result == []
+
+
+@patch("app.rag.retrieval.get_collection")
+@patch("app.rag.retrieval.embed", return_value=[0.1, 0.2, 0.3])
+def test_retrieve_retries_without_where_when_filtered_result_empty(mock_embed, mock_get_col) -> None:
+    mock_col = MagicMock()
+    mock_col.query.side_effect = [
+        {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]},
+        _make_chroma_result(1),
+    ]
+    mock_get_col.return_value = mock_col
+
+    result = retrieve("test query", k=4, topics=["ai-ml"])
+
+    assert len(result) == 1
+    assert mock_col.query.call_count == 2
+    first_call = mock_col.query.call_args_list[0].kwargs
+    second_call = mock_col.query.call_args_list[1].kwargs
+    assert "where_document" in first_call
+    assert "where_document" not in second_call

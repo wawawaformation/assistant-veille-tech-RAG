@@ -12,14 +12,51 @@ from app.logger import AppLogger
 
 logger = AppLogger.get_logger(__name__)
 
-_DEFAULT_LIMIT = 30
+_DEFAULT_LIMIT = 100
 _HTTP_TIMEOUT = 8.0
-
 
 def _topic_keywords(topic: str) -> list[str]:
     """Retourne les mots-clés associés à un topic, synonymes inclus."""
     normalized = topic.lower().strip()
-    return [normalized, *TOPIC_SYNONYMS.get(normalized, [])]
+    values = [normalized, *TOPIC_SYNONYMS.get(normalized, [])]
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        key = value.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+
+    return deduped
+
+
+async def _fetch_story_ids(client: httpx.AsyncClient) -> list[int]:
+    """Fusionne topstories et newstories pour augmenter les chances de match topic."""
+
+    out: list[int] = []
+    seen: set[int] = set()
+
+    for endpoint in ("topstories.json", "newstories.json"):
+        response = await client.get(f"https://hacker-news.firebaseio.com/v0/{endpoint}")
+        response.raise_for_status()
+        values = response.json()
+
+        if not isinstance(values, list):
+            continue
+
+        for raw_id in values:
+            try:
+                story_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if story_id in seen:
+                continue
+            seen.add(story_id)
+            out.append(story_id)
+
+    return out
 
 
 def _contains_keyword(haystack: str, keyword: str) -> bool:
@@ -63,9 +100,7 @@ async def fetch(
 
    
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-        response = await client.get("https://hacker-news.firebaseio.com/v0/newstories.json")
-        response.raise_for_status()
-        ids = response.json()
+        ids = await _fetch_story_ids(client)
 
    
     articles: list[dict[str, Any]] = []
@@ -74,6 +109,8 @@ async def fetch(
             response = await client.get(f"https://hacker-news.firebaseio.com/v0/item/{article_id}.json")
             response.raise_for_status()
             article = response.json()
+            if not isinstance(article, dict) or article.get("type") != "story":
+                continue
             articles.append(article)
 
     

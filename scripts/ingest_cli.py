@@ -1,4 +1,7 @@
 from __future__ import annotations
+from codecarbon import EmissionsTracker
+
+
 
 import json
 import sys
@@ -21,11 +24,25 @@ app = typer.Typer(help="Ingestion CLI for the veille tech index.")
 def news(
     topics: list[str] = typer.Option([], "--topic", "-t", help="Topic to query."),
     page_size: int = typer.Option(20, "--page-size", "-n", help="Max articles to fetch per run."),
+    empreinte_carbone: bool = typer.Option(
+        False,
+        "--empreinte-carbone/--no-empreinte-carbone",
+        help="Track carbon emissions during ingestion (disabled by default).",
+    ),
 ) -> None:
+    tracker = None
+    if empreinte_carbone:
+        tracker = EmissionsTracker(save_to_api=False)
+        tracker.start()
+
     ingester = NewsApiIngester()
     articles = ingester.run(topics, page_size=page_size)
     typer.echo(f"Ingested {len(articles)} articles")
     typer.echo(json.dumps(articles, default=str, ensure_ascii=False, indent=2))
+
+    if empreinte_carbone and tracker is not None:
+        emissions = tracker.stop()
+        typer.echo(f"Carbon emissions tracked during ingestion: {emissions * 1e6:.4f} µg CO2")
 
 
 @app.command()
@@ -37,7 +54,17 @@ def scrape(
         "--upsert/--no-upsert",
         help="Index scraped articles into Chroma (enabled by default).",
     ),
+    empreinte_carbone: bool = typer.Option(
+        False,
+        "--empreinte-carbone/--no-empreinte-carbone",
+        help="Track carbon emissions during scraping (disabled by default).",
+    ),
 ) -> None:
+    tracker = None
+    if empreinte_carbone:
+        tracker = EmissionsTracker(save_to_api=False)
+        tracker.start()
+    
     if howmany <= 0:
         raise typer.BadParameter("--howmany must be a positive integer")
 
@@ -58,6 +85,10 @@ def scrape(
     if upsert:
         typer.echo(f"Indexed {upserted_chunks} chunk(s) into Chroma")
     typer.echo(json.dumps(payload, default=str, ensure_ascii=False, indent=2))
+
+    if empreinte_carbone and tracker is not None:
+        emissions = tracker.stop()
+        typer.echo(f"Carbon emissions tracked during scraping: {emissions * 1e6:.4f} µg CO2")
 
 
 if __name__ == "__main__":
